@@ -25,15 +25,18 @@ class FileStats:
     """Store file descriptions i.e. file name, products before and products after"""
     website: str
     category: str
-    products_count_before: int
+    output_path: str
+    products_count_before: Optional[int] = None
     products_count_after: Optional[int] = None
 
 class DataHandler:
     """Removes any rows with blank values for title, price or image"""
-    def __init__(self) -> None:
+    def __init__(self, stats: list[FileStats]) -> None:
         self.logger = Logger(__class__.__name__)
 
         self.queue = Queue()
+
+        self.stats = stats
 
         [threading.Thread(target=self.__work, daemon=True).start() for _ in range(3)]
 
@@ -96,13 +99,23 @@ class DataHandler:
         elif re.search(r"\\", file_path):
             filename = file_path.split("\\")[-1]
 
+        stats = [dataclasses.asdict(record) for record in self.stats]
+
+        [record.pop("output_path") for record in stats]
+
+        pd.DataFrame(stats).to_csv("./stats/stats.csv", index=False)
+
         self.logger.info("Non-null records saved to {}".format(filename))
     
     def __work(self) -> None:
         while True:
             output_path = self.queue.get()
 
+            stats = self.__get_stats(output_path)
+
             df =  self.__read_file(output_path)
+
+            stats.products_count_before = len(df)
 
             if df is None:
                 self.queue.task_done()
@@ -115,6 +128,13 @@ class DataHandler:
 
             [df.dropna(subset=column, inplace=True) for column in NON_NULL_COLUMNS]
 
+            stats.products_count_after = len(df)
+
             self.__save(df, output_path)
 
             self.queue.task_done()
+    
+    def __get_stats(self, output_path: str) -> FileStats:
+        for stats in self.stats:
+            if stats.output_path == output_path:
+                return stats

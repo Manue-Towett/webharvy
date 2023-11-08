@@ -9,16 +9,16 @@ from queue import Queue
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date as dt
 
-from apps import DataHandler
+from apps import DataHandler, FileStats
 from utils import Logger, SQLHandler, ConfigFile
 
 BASE_DIR = Path(__file__).resolve().parent
 
 DELAY_RE = re.compile(r"\b(\d+)\spage.+\b(\d+)s", re.I)
 
-FILENAME_RE = re.compile(r"(.+?)_(\w+?)_(\d+).xml", re.I)
+FILENAME_RE = re.compile(r"(.+?)_([a-zA-Z0-9\-]+?)_(\d+).*.xml", re.I)
 
 config = configparser.ConfigParser()
 
@@ -26,8 +26,6 @@ with open("./settings/settings.ini") as file:
     config.read_file(file)
 
 OUTPUT_FILE_PATH = config.get("paths", "output_path")
-
-WEBHARVY_EXE_PATH = "/SysNucleus/WebHarvy/WebHarvy.exe"
 
 CONFIG_FILES_PATH = config.get("paths", "config_files")
 
@@ -37,7 +35,7 @@ FILE_EXTENSION = config.get("output_file", "file_extension")
 
 FILE_WRITE_MODE = config.get("output_file", "file_write_mode")
 
-# os.system('ls {}'.format(BASE_DIR))
+WEBHARVY_EXE_PATH = os.path.join(os.getenv("APPDATA"), "SysNucleus\\WebHarvy\\WebHarvy.exe")
 
 @dataclasses.dataclass
 class Schedule:
@@ -60,17 +58,17 @@ class WebHarvyScraper:
     def __init__(self) -> None:
         self.logger = Logger(__class__.__name__)
         self.logger.info("{:*^50}".format(f"{__class__.__name__} Started"))
+
+        self.stats: list[FileStats] = []
+        self.processed_files: list[str] = []
+        self.unprocessed_files: list[OutputFile] = []
         
         self.sql = SQLHandler()
         self.submit_queue = Queue()
-        self.data_handler = DataHandler()
-
-        self.processed_files: list[str] = []
-        self.unprocessed_files: list[OutputFile] = []
+        self.submit_file_queue = Queue()
+        self.data_handler = DataHandler(self.stats)
 
         self.delays = self.__read_delay_settings()
-
-        self.last_processed = None
     
     def __read_delay_settings(self) -> dict[int, int]:
         delays = {}
@@ -99,16 +97,21 @@ class WebHarvyScraper:
             if re.search(today, day, re.I):
                 return f"{CONFIG_FILES_PATH}{day}/"
     
-    @staticmethod
-    def __get_status(file: str, submitted: list[ConfigFile]) -> bool:
+    def __get_status(self, file: str, submitted: list[ConfigFile], weekday: str) -> bool:
+        date_schedule = self.__get_date_difference(weekday)
+
         for config_file in submitted:
             if file == config_file.filename:
-                return not bool((datetime.now() - config_file.last_run).days)
+                return date_schedule <= config_file.last_run
         
         return False
     
     def __get_delay(self, pages: int) -> int:
-        for page_num in list(self.delays.keys()).sort():
+        page_nums = list(self.delays.keys())
+
+        page_nums.sort()
+
+        for page_num in page_nums:
             if page_num > pages:
                 return self.delays[page_num]
         
@@ -139,19 +142,19 @@ class WebHarvyScraper:
 
         return date_schedule
     
-    def __get_next_schedule_time(self) -> timedelta:
+    def __get_next_schedule_time(self, today_done: Optional[bool]=False) -> timedelta:
         weekday = self.__get_weekday()
 
         date_schedule = self.__get_date_difference(weekday)
 
-        if datetime.now() > date_schedule and self.last_processed == weekday:
+        if datetime.now() > date_schedule and today_done:
             weekday = self.__get_weekday(datetime.now() + timedelta(days=1))
 
-            date_schedule = self.__get_date_difference(weekday)
+            date_schedule = self.__get_date_difference(weekday) + timedelta(days=1)
 
         return datetime.now() - date_schedule
     
-    def __get_config_files(self) -> Optional[list[dict[str, str]]]:
+    def __get_config_files(self, weekday: str) -> Optional[list[dict[str, str]]]:
         unsubmitted = []
 
         submitted = self.sql.fetch_records(datetime.now())
@@ -165,7 +168,7 @@ class WebHarvyScraper:
 
             if file.endswith(".xml"):
                 if submitted is not None:
-                    has_been_submitted = self.__get_status(file, submitted)
+                    has_been_submitted = self.__get_status(file, submitted, weekday)
                 
                 if not has_been_submitted:
                     unsubmitted.append({file: f"{config_path}{file}"})
@@ -173,7 +176,7 @@ class WebHarvyScraper:
         if len(unsubmitted):
             random.shuffle(unsubmitted)
 
-            self.logger.info("{} files scheduled for submission at {}")
+            self.logger.info("{} files scheduled for submission".format(len(unsubmitted)))
         
             return unsubmitted
     
@@ -181,12 +184,22 @@ class WebHarvyScraper:
         time_modified = time.ctime(os.path.getmtime(file_path))
 
         return datetime.strptime(time_modified, "%a %b %d %H:%M:%S %Y")
+    
+    def __submit_file(self) -> None:
+        while True:
+            file_args = self.submit_file_queue.get()
+
+            os.system(f"{WEBHARVY_EXE_PATH} {file_args}")
+
+            self.submit_file_queue.task_done()
 
     def __submit(self) -> None:
         while True:
             job: dict[str, str] = self.submit_queue.get()
 
             file_name, file_path = list(job.items())[0]
+
+            self.logger.info("Submitting file %s" % file_name)
 
             output_file_re = FILENAME_RE.search(file_name)
 
@@ -211,14 +224,23 @@ class WebHarvyScraper:
 
             output_object = OutputFile(output_file, output_path)
 
+            self.stats.append(FileStats(website, category, output_path=output_path))
+
             if os.path.isfile(output_path):
                 output_object.last_modified = self.__check_modification_time(output_path)
+            
+            output_dir = os.path.join(BASE_DIR, output_path.lstrip(".").lstrip("/").lstrip("\\"))
 
-            arg = f"{file_path} {page_count} {output_path} {FILE_WRITE_MODE}"
+            file_dir = os.path.join(BASE_DIR, file_path.lstrip(".").lstrip("/").lstrip("\\"))
 
-            os.system(f"webharvy {arg}")
+            self.submit_file_queue.put(f"{file_dir} {int(page_count)} {output_dir} {FILE_WRITE_MODE}")
 
             self.unprocessed_files.append(output_object)
+
+            self.sql.add_record(ConfigFile(file_name, datetime.now()))
+
+            if job != self.last_file:
+                self.logger.info("Next file to be submitted in %ss" % delay)
 
             time.sleep(delay)
 
@@ -242,6 +264,8 @@ class WebHarvyScraper:
 
                 if difference.total_seconds() < 120: continue
 
+                self.logger.info("Removing null values in %s" % file.filename)
+
                 self.data_handler.queue.put(file.filepath)
 
                 self.data_handler.queue.join()
@@ -253,50 +277,54 @@ class WebHarvyScraper:
             [self.unprocessed_files.remove(file) for file in files_to_remove]
 
     def __process_files(self, unsubmitted_files: list[dict[str, str]]) -> None:
-        for file in unsubmitted_files:
-            self.submit_queue.put(file)
+        self.last_file = unsubmitted_files[-1]
 
-            self.submit_queue.join()
-
-            key = list(file.items())[0][0]
-
-            self.sql.add_record(ConfigFile(key, datetime.now()))
+        [self.submit_queue.put(file) for file in unsubmitted_files] 
+        
+        self.submit_queue.join()
 
     def __start_workers(self) -> None:
         threading.Thread(target=self.__submit, daemon=True).start()
 
         threading.Thread(target=self.__get_processed_files, daemon=True).start()
 
+        [threading.Thread(target=self.__submit_file, daemon=True).start() for _ in range(10)]
+
     def run(self) -> None:
         self.__start_workers()
 
+        past_schedules = []
+
         while True:
-            date_schedule = self.__get_next_schedule_time()
+            date_schedule = self.__get_next_schedule_time(dt.today() in past_schedules)
 
-            total_minutes = date_schedule.total_seconds() / 60
+            total_seconds = date_schedule.total_seconds()
 
-            if total_minutes < 0:
+            total_minutes = total_seconds / 60
+
+            if date_schedule.days < 0 or total_minutes < 0:
+                total_minutes = abs(total_minutes)
+
                 hours = int(total_minutes / 60)
 
                 minutes = int(total_minutes - hours * 60)
 
-                if minutes % 2:
-                    self.logger.info(f"{hours} hours {minutes} minutes"
-                                    " remaining to the next available job")
+                if minutes % 10 == 0:
+                    self.logger.info(f"{hours} hours {minutes} minutes remaining to the next available job")
                     
                     time.sleep(60)
 
-                continue
+                    continue
             
             weekday = self.__get_weekday()
 
-            self.logger.info("Schedule time reached for {}".format(weekday))
-
-            self.last_processed = weekday
+            past_schedules.append(dt.today())
             
-            unsubmitted_files = self.__get_config_files()
+            unsubmitted_files = self.__get_config_files(weekday)
 
             if unsubmitted_files is None: continue
+
+            self.logger.info("Scheduled time reached for {}".format(weekday))
 
             self.__process_files(unsubmitted_files)
 

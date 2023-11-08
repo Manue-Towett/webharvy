@@ -44,12 +44,12 @@ class SQLHandler:
 
     def __record_exists(self, file: ConfigFile) -> bool:
         with self.engine.connect() as connection:
-            record = connection.execute(self.table.select().where(
+            records = connection.execute(self.table.select().where(
                     self.table.c.filename == file.filename
                 )
-            )
+            ).fetchall()
 
-            return bool(record)
+            return True if len(records) else False
     
     def __update_record(self, file: ConfigFile) -> None:
         with self.engine.connect() as connection:
@@ -80,4 +80,4 @@ class SQLHandler:
             records = connection.execute(stmt).fetchall()
 
         if len(records):
-            return [ConfigFile(record[0:-1]) for record in records]
+            return [ConfigFile(*record[1:-1]) for record in records]
