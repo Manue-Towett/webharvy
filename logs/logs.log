@@ -1,0 +1,8 @@
+WebHarvyScraper:INFO - *************WebHarvyScraper Started**************
+WebHarvyScraper:INFO - 1 files scheduled for submission
+WebHarvyScraper:INFO - Scheduled time reached for Wednesday
+WebHarvyScraper:INFO - Submitting file anntaylor.com_clothing_11.01.2023_config.xml
+WebHarvyScraper:INFO - Removing null values in anntaylor_clothing_11.8.23.csv
+DataHandler:INFO - Non-null records saved to anntaylor_clothing_11.8.23.csv
+WebHarvyScraper:INFO - 6 hours 50 minutes remaining to the next available job
+WebHarvyScraper:INFO - 6 hours 40 minutes remaining to the next available job

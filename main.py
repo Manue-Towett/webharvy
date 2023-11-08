@@ -16,6 +16,8 @@ from utils import Logger, SQLHandler, ConfigFile
 
 BASE_DIR = Path(__file__).resolve().parent
 
+DELAY_SETTINGS_PATH = "./settings/delays.txt"
+
 DELAY_RE = re.compile(r"\b(\d+)\spage.+\b(\d+)s", re.I)
 
 FILENAME_RE = re.compile(r"(.+?)_([a-zA-Z0-9\-]+?)_(\d+).*.xml", re.I)
@@ -28,8 +30,6 @@ with open("./settings/settings.ini") as file:
 OUTPUT_FILE_PATH = config.get("paths", "output_path")
 
 CONFIG_FILES_PATH = config.get("paths", "config_files")
-
-DELAY_SETTINGS_PATH = config.get("paths", "pages_delays")
 
 FILE_EXTENSION = config.get("output_file", "file_extension")
 
