@@ -1,0 +1,6 @@
+10 pages - 120s
+20 pages - 160s
+30 pages - 180s
+50 pages - 300s
+75 pages - 500s
+100 pages - 700s
