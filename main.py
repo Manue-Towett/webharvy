@@ -20,7 +20,7 @@ DELAY_SETTINGS_PATH = "./settings/delays.txt"
 
 DELAY_RE = re.compile(r"\b(\d+)\spage.+\b(\d+)s", re.I)
 
-FILENAME_RE = re.compile(r"(.+?)_([a-zA-Z0-9\-]+?)_(\d+).*.xml", re.I)
+FILENAME_RE = re.compile(r"(.+?)_([a-zA-Z0-9\-\*'\"]+?)_(\d+).*.xml", re.I)
 
 config = configparser.ConfigParser()
 
@@ -34,6 +34,8 @@ CONFIG_FILES_PATH = config.get("paths", "config_files")
 FILE_EXTENSION = config.get("output_file", "file_extension")
 
 FILE_WRITE_MODE = config.get("output_file", "file_write_mode")
+
+THREAD_NUM = int(config.get("concurrency", "thread_num"))
 
 WEBHARVY_EXE_PATH = os.path.join(os.getenv("APPDATA"), "SysNucleus\\WebHarvy\\WebHarvy.exe")
 
@@ -53,6 +55,12 @@ class OutputFile:
     filepath: str
     last_modified: Optional[datetime] = None
 
+@dataclasses.dataclass
+class Files:
+    website: str
+    config_path: str
+    files: Optional[list[str]] = dataclasses.field(default_factory=list)
+
 class WebHarvyScraper:
     """Submits configuration files to webharvy app"""
     def __init__(self) -> None:
@@ -60,12 +68,13 @@ class WebHarvyScraper:
         self.logger.info("{:*^50}".format(f"{__class__.__name__} Started"))
 
         self.stats: list[FileStats] = []
-        self.processed_files: list[str] = []
-        self.unprocessed_files: list[OutputFile] = []
+        
+        self.website_queue = Queue()
+        self.submit_file_queue = Queue()
+
+        self.__start_workers()
         
         self.sql = SQLHandler()
-        self.submit_queue = Queue()
-        self.submit_file_queue = Queue()
         self.data_handler = DataHandler(self.stats)
 
         self.delays = self.__read_delay_settings()
@@ -82,6 +91,30 @@ class WebHarvyScraper:
                 delays[int(page_delay.group(1))] = int(page_delay.group(2))
         
         return delays
+    
+    @staticmethod
+    def __get_files(config_path: str, unsubmitted: list[str]) -> list[Files]:
+        files: list[Files] = []
+        processed: list[str] = []
+
+        for file in os.listdir(config_path):
+            if not file in unsubmitted: continue
+
+            file_re = FILENAME_RE.search(file)
+
+            file_path = f"{config_path}{file}"
+
+            if file_re and file_re.group(1) not in processed:
+                config_file = Files(website=file_re.group(1), config_path=config_path, files=[file_path])
+
+                processed.append(config_file.website)
+
+                files.append(config_file)
+
+            elif file_re:
+                [f.files.append(file_path) for f in files if file_re.group(1) == f.website]
+
+        return files
     
     @staticmethod
     def __get_weekday(date_: Optional[datetime]=None) -> str:
@@ -154,7 +187,7 @@ class WebHarvyScraper:
 
         return datetime.now() - date_schedule
     
-    def __get_config_files(self, weekday: str) -> Optional[list[dict[str, str]]]:
+    def __get_config_files(self, weekday: str) -> list[Files]:
         unsubmitted = []
 
         submitted = self.sql.fetch_records(datetime.now())
@@ -162,7 +195,7 @@ class WebHarvyScraper:
         config_path = self.__get_config_path()
 
         if config_path is None: return
-
+        
         for file in os.listdir(config_path):
             has_been_submitted = False
 
@@ -171,14 +204,16 @@ class WebHarvyScraper:
                     has_been_submitted = self.__get_status(file, submitted, weekday)
                 
                 if not has_been_submitted:
-                    unsubmitted.append({file: f"{config_path}{file}"})
+                    unsubmitted.append(file)
         
         if len(unsubmitted):
-            random.shuffle(unsubmitted)
+            config_files = self.__get_files(config_path, unsubmitted)
 
-            self.logger.info("{} files scheduled for submission".format(len(unsubmitted)))
+            random.shuffle(config_files)
+
+            self.logger.info(f"{len(config_files)} websites ({len(unsubmitted)} files) scheduled for submission")
         
-            return unsubmitted
+            return config_files
     
     def __check_modification_time(self, file_path: str) -> datetime:
         time_modified = time.ctime(os.path.getmtime(file_path))
@@ -192,14 +227,14 @@ class WebHarvyScraper:
             os.system(f"{WEBHARVY_EXE_PATH} {file_args}")
 
             self.submit_file_queue.task_done()
+    
+    def __process_config_files(self, files: Files) -> None:
+        name = threading.current_thread().name.split(" ")[0]
 
-    def __submit(self) -> None:
-        while True:
-            job: dict[str, str] = self.submit_queue.get()
+        for file in files.files:
+            file_path, file_name = file, file.split(files.config_path)[-1]
 
-            file_name, file_path = list(job.items())[0]
-
-            self.logger.info("Submitting file %s" % file_name)
+            self.logger.info("%s: Submitting file %s" % (name, file_name))
 
             output_file_re = FILENAME_RE.search(file_name)
 
@@ -235,64 +270,57 @@ class WebHarvyScraper:
 
             self.submit_file_queue.put(f"{file_dir} {int(page_count)} {output_dir} {FILE_WRITE_MODE}")
 
-            self.unprocessed_files.append(output_object)
+            self.__wait_for_processed_file(name, output_object)
 
             self.sql.add_record(ConfigFile(file_name, datetime.now()))
 
-            if job != self.last_file:
-                self.logger.info("Next file to be submitted in %ss" % delay)
+            if file != files.files[-1]:
+                self.logger.info("%s: Next file to be submitted in %ss" % (name, delay))
 
             time.sleep(delay)
 
-            self.submit_queue.task_done()
-
-    def __get_processed_files(self) -> Optional[list[str]]:
+    def __work_website(self) -> None:
         while True:
-            files_to_remove = []
+            job: Files = self.website_queue.get()
 
-            for file in self.unprocessed_files:
-                if not os.path.isfile(file.filepath):continue
-
-                last_modification = self.__check_modification_time(file.filepath)
-
-                if file.last_modified is not None:
-                    difference = last_modification - file.last_modified
-
-                    if difference.total_seconds() <= 0: continue
-                
-                difference = datetime.now() - last_modification
-
-                if difference.total_seconds() < 120: continue
-
-                self.logger.info("Removing null values in %s" % file.filename)
-
-                self.data_handler.queue.put(file.filepath)
-
-                self.data_handler.queue.join()
-
-                files_to_remove.append(file)
-
-                self.processed_files.append(file.filename)
+            self.__process_config_files(job)
             
-            [self.unprocessed_files.remove(file) for file in files_to_remove]
+            self.website_queue.task_done()
 
-    def __process_files(self, unsubmitted_files: list[dict[str, str]]) -> None:
+    def __wait_for_processed_file(self, name: str, output_file: OutputFile) -> None:
+        while True:
+            if not os.path.isfile(output_file.filepath):continue
+
+            last_modification = self.__check_modification_time(output_file.filepath)
+
+            if output_file.last_modified is not None:
+                difference = last_modification - output_file.last_modified
+
+                if difference.total_seconds() <= 0: continue
+            
+            difference = datetime.now() - last_modification
+
+            if difference.total_seconds() < 30: continue
+
+            self.logger.info("%s: Removing null values in %s" % (name, output_file.filename))
+
+            self.data_handler.queue.put((name, output_file.filepath))
+
+            return self.data_handler.queue.join()
+
+    def __create_queue(self, unsubmitted_files: list[dict[str, str]]) -> None:
         self.last_file = unsubmitted_files[-1]
 
-        [self.submit_queue.put(file) for file in unsubmitted_files] 
+        [self.website_queue.put(file) for file in unsubmitted_files] 
         
-        self.submit_queue.join()
+        self.website_queue.join()
 
     def __start_workers(self) -> None:
-        threading.Thread(target=self.__submit, daemon=True).start()
+        [threading.Thread(target=self.__work_website, daemon=True).start() for _ in range(THREAD_NUM)]
 
-        threading.Thread(target=self.__get_processed_files, daemon=True).start()
-
-        [threading.Thread(target=self.__submit_file, daemon=True).start() for _ in range(10)]
+        [threading.Thread(target=self.__submit_file, daemon=True).start() for _ in range(THREAD_NUM)]
 
     def run(self) -> None:
-        self.__start_workers()
-
         past_schedules = []
 
         while True:
@@ -307,14 +335,18 @@ class WebHarvyScraper:
 
                 hours = int(total_minutes / 60)
 
-                minutes = int(total_minutes - hours * 60)
+                minutes = int(total_minutes - (hours * 60))
+
+                seconds = int(abs(total_seconds) - ((hours * 3600) + (minutes * 60)))
 
                 if minutes % 10 == 0:
-                    self.logger.info(f"{hours} hours {minutes} minutes remaining to the next available job")
+                    time_remaining = f"{hours} hours {minutes} minutes {seconds} seconds"
+
+                    self.logger.info(f"{time_remaining} remaining to the next available job")
                     
                     time.sleep(60)
 
-                    continue
+                continue
             
             weekday = self.__get_weekday()
 
@@ -326,7 +358,7 @@ class WebHarvyScraper:
 
             self.logger.info("Scheduled time reached for {}".format(weekday))
 
-            self.__process_files(unsubmitted_files)
+            self.__create_queue(unsubmitted_files)
 
 
 if __name__ == "__main__":

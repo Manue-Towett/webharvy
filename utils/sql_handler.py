@@ -31,8 +31,7 @@ class SQLHandler:
     def __create_table(self) -> Table:
         meta = MetaData()
 
-        progress_table = Table("progress", 
-                               meta,
+        progress_table = Table("progress", meta,
                                Column("id", Integer, primary_key=True),
                                Column("filename", String),
                                Column("last_run", DateTime),
@@ -44,18 +43,18 @@ class SQLHandler:
 
     def __record_exists(self, file: ConfigFile) -> bool:
         with self.engine.connect() as connection:
-            records = connection.execute(self.table.select().where(
-                    self.table.c.filename == file.filename
-                )
-            ).fetchall()
+            query = self.table.select().where(self.table.c.filename == file.filename)
+
+            records = connection.execute(query).fetchall()
 
             return True if len(records) else False
     
     def __update_record(self, file: ConfigFile) -> None:
         with self.engine.connect() as connection:
-            connection.execute(self.table.update().where(
-                    self.table.c.filename == file.filename).values(
-                    last_run = file.last_run))
+            query = self.table.update().where(self.table.c.filename == file.filename)
+
+            connection.execute(query.values(last_run = file.last_run, 
+                                            weekday = file.last_run.strftime("%A")))
             
             connection.commit()
     
@@ -74,8 +73,7 @@ class SQLHandler:
 
     def fetch_records(self, _date: datetime) -> Optional[list[ConfigFile]]:
         with self.engine.connect() as connection:
-            stmt = self.table.select().where(
-                self.table.c.weekday==_date.strftime("%A"))
+            stmt = self.table.select().where(self.table.c.weekday==_date.strftime("%A"))
             
             records = connection.execute(stmt).fetchall()
 

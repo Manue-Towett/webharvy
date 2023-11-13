@@ -80,7 +80,7 @@ class DataHandler:
         self.logger.warn("Skipping removal of blanks as the script is not "
                          "configured to handle {} file type".format(extension))
     
-    def __save(self, df: pd.DataFrame, file_path: str) -> None:
+    def __save(self, df: pd.DataFrame, file_path: str, name: str) -> None:
         if re.search(r".xlsx$", file_path, re.I):
             df.to_excel(file_path, index=False)
         elif re.search(r".csv$", file_path, re.I):
@@ -105,11 +105,11 @@ class DataHandler:
 
         pd.DataFrame(stats).to_csv("./stats/stats.csv", index=False)
 
-        self.logger.info("Non-null records saved to {}".format(filename))
+        self.logger.info("{}: Non-null records saved to {}".format(name, filename))
     
     def __work(self) -> None:
         while True:
-            output_path = self.queue.get()
+            name, output_path = self.queue.get()
 
             stats = self.__get_stats(output_path)
 
@@ -130,11 +130,10 @@ class DataHandler:
 
             stats.products_count_after = len(df)
 
-            self.__save(df, output_path)
+            self.__save(df, output_path, name)
 
             self.queue.task_done()
     
     def __get_stats(self, output_path: str) -> FileStats:
         for stats in self.stats:
-            if stats.output_path == output_path:
-                return stats
+            if stats.output_path == output_path: return stats

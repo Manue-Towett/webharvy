@@ -9,7 +9,7 @@ Requires: python 3.11+
 
 ## Configuration
 - delays:
-    - put each (pages/delay in seconds) on its on row in the delays.txt in the format
+    - put each (pages/delay in seconds) on its on row in the delays.txt in the format:
 
         ```<pages> pages - <delay>s```
 
@@ -22,7 +22,9 @@ Requires: python 3.11+
     - file_extension: csv/tsv/xml/json
 
 - schedules:
-    - time for submission of files for each weekday in 24 hour clock system
+    - time for submission of files for each weekday in 24 hour clock system int the format:
+
+        ```<hours>:<minutes>``` eg. 18:00
 
 ## Installing Requirements
 - pip install -r requirements.txt
